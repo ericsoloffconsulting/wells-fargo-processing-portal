@@ -853,9 +853,74 @@ define(['N/ui/serverWidget', 'N/search', 'N/log', 'N/url', 'N/record', 'N/redire
     }
 
     /**
+     * Batch loads the most recent note for multiple transactions at once
+     * @param {Array<number>} transactionIds - Array of transaction internal IDs
+     * @returns {Object} Map of transactionId -> note object
+     */
+    function batchLoadMostRecentNotes(transactionIds) {
+        var noteMap = {};
+        
+        if (!transactionIds || transactionIds.length === 0) {
+            return noteMap;
+        }
+
+        try {
+            // Build IN clause with transaction IDs
+            var idList = transactionIds.join(',');
+            
+            // Use SuiteQL with window function to get only the most recent note per transaction
+            var sql = 'SELECT * FROM (' +
+                'SELECT ' +
+                'TransactionNote.Transaction, ' +
+                'TransactionNote.ID, ' +
+                'TransactionNote.NoteDate, ' +
+                'TransactionNote.Note, ' +
+                'TransactionNote.Title, ' +
+                '(Employee.FirstName || \' \' || Employee.LastName) AS Author, ' +
+                'ROW_NUMBER() OVER (PARTITION BY TransactionNote.Transaction ORDER BY TransactionNote.NoteDate DESC) AS rn ' +
+                'FROM TransactionNote ' +
+                'INNER JOIN Employee ON (Employee.ID = TransactionNote.Author) ' +
+                'WHERE TransactionNote.Transaction IN (' + idList + ') ' +
+                ') WHERE rn = 1';
+
+            var results = query.runSuiteQL({
+                query: sql
+            }).asMappedResults();
+
+            log.debug('Batch loaded notes', {
+                transactionCount: transactionIds.length,
+                notesFound: results ? results.length : 0
+            });
+
+            // Build map of transaction ID to note
+            if (results && results.length > 0) {
+                for (var i = 0; i < results.length; i++) {
+                    var result = results[i];
+                    noteMap[result.transaction] = {
+                        id: result.id || '',
+                        notedate: result.notedate || '',
+                        note: result.note || '',
+                        title: result.title || '',
+                        author: result.author || ''
+                    };
+                }
+            }
+
+            return noteMap;
+        } catch (e) {
+            log.error('Error batch loading notes', {
+                error: e.message,
+                stack: e.stack
+            });
+            return noteMap;
+        }
+    }
+
+    /**
      * Gets the most recent note for a given transaction using SuiteQL TransactionNote table
      * @param {number} transactionId - The transaction internal ID
      * @returns {Object|null} Note object with notedate, note text, author, and note ID, or null if no notes found
+     * @deprecated Use batchLoadMostRecentNotes for better performance
      */
     function getMostRecentNote(transactionId) {
         if (!transactionId) {
@@ -907,9 +972,85 @@ define(['N/ui/serverWidget', 'N/search', 'N/log', 'N/url', 'N/record', 'N/redire
     }
 
     /**
+     * Batch loads Wells Fargo Authorization records for multiple Sales Orders at once
+     * @param {Array<number>} salesOrderIds - Array of Sales Order internal IDs
+     * @returns {Object} Map of salesOrderId -> {records, total, authNumbers}
+     */
+    function batchLoadWellsFargoAuths(salesOrderIds) {
+        var authMap = {};
+        
+        if (!salesOrderIds || salesOrderIds.length === 0) {
+            return authMap;
+        }
+
+        try {
+            // Search for all Wells Fargo Authorization records for all Sales Orders at once
+            var wfAuthSearch = search.create({
+                type: 'customrecord_bas_wf_auth',
+                filters: [
+                    ['custrecord_bas_wf_so_number', 'anyof', salesOrderIds]
+                ],
+                columns: [
+                    'custrecord_bas_wf_so_number', // Sales Order
+                    'name', // Record name
+                    'custrecord26', // Authorization amount
+                    'custrecord25'  // Authorization number
+                ]
+            });
+
+            // Initialize empty result for each sales order
+            for (var i = 0; i < salesOrderIds.length; i++) {
+                authMap[salesOrderIds[i]] = {
+                    records: [],
+                    total: 0,
+                    authNumbers: []
+                };
+            }
+
+            wfAuthSearch.run().each(function(result) {
+                var soId = result.getValue('custrecord_bas_wf_so_number');
+                var recordName = result.getValue('name') || '';
+                var amount = parseFloat(result.getValue('custrecord26')) || 0;
+                var authNumber = result.getValue('custrecord25') || '';
+                var recordId = result.id;
+
+                if (soId && authMap[soId]) {
+                    authMap[soId].records.push({
+                        id: recordId,
+                        name: recordName,
+                        amount: amount,
+                        authNumber: authNumber
+                    });
+                    authMap[soId].total += amount;
+                    if (authNumber) {
+                        authMap[soId].authNumbers.push(authNumber);
+                    }
+                }
+
+                return true; // Continue iteration
+            });
+
+            log.debug('Batch loaded Wells Fargo Auths', {
+                salesOrderCount: salesOrderIds.length,
+                authsFound: Object.keys(authMap).filter(function(k) { return authMap[k].records.length > 0; }).length
+            });
+
+            return authMap;
+
+        } catch (e) {
+            log.error('Error batch loading Wells Fargo Auths', {
+                error: e.message,
+                stack: e.stack
+            });
+            return authMap;
+        }
+    }
+
+    /**
      * Gets all Wells Fargo Authorization records linked to a Sales Order
      * @param {number} salesOrderId - The Sales Order internal ID
      * @returns {Object} Object containing WF auth records array and total amount
+     * @deprecated Use batchLoadWellsFargoAuths for better performance
      */
     function getWellsFargoAuthsForSalesOrder(salesOrderId) {
         if (!salesOrderId) {
@@ -991,7 +1132,7 @@ define(['N/ui/serverWidget', 'N/search', 'N/log', 'N/url', 'N/record', 'N/redire
             '.smalltextnolink { border: none !important; }' +
 
             // Main container styling
-            '.wells-fargo-container { margin: 0; padding: 20px; border: none; background: transparent; position: relative; }' +
+            '.wells-fargo-container { margin: 0; padding: 8px 8px 20px 8px; border: none; background: transparent; position: relative; }' +
 
             // SOP Quick Link styling
             '.sop-link-container { position: absolute; top: 0; right: 0; z-index: 100; }' +
@@ -1002,8 +1143,8 @@ define(['N/ui/serverWidget', 'N/search', 'N/log', 'N/url', 'N/record', 'N/redire
 
             // Table styling
             'table.search-table { border-collapse: collapse; width: 100%; margin: 15px 0; border: 1px solid #ddd; background: white; }' +
-            'table.search-table th, table.search-table td { border: 1px solid #ddd; padding: 8px; text-align: left; vertical-align: top; }' +
-            'table.search-table th { background-color: #f8f9fa; font-weight: bold; color: #333; font-size: 12px; position: -webkit-sticky; position: sticky; top: 0; z-index: 100; box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1); }' +
+            'table.search-table th, table.search-table td { border: 1px solid #ddd; padding: 5px; text-align: left; vertical-align: top; font-size: 11px; }' +
+            'table.search-table th { background-color: #f8f9fa; font-weight: bold; color: #333; font-size: 11px; position: -webkit-sticky; position: sticky; top: 0; z-index: 100; box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1); }' +
             'table.search-table tr:nth-child(even) td { background-color: #f9f9f9; }' +
             'table.search-table tr:hover td { background-color: #e8f4f8; }' +
 
@@ -1393,6 +1534,40 @@ define(['N/ui/serverWidget', 'N/search', 'N/log', 'N/url', 'N/record', 'N/redire
                 return '<div style="padding: 10px; font-style: italic; color: #666;">No results found</div>';
             }
 
+            // BATCH LOAD OPTIMIZATION: Collect all transaction IDs and Sales Order IDs upfront
+            var transactionIds = [];
+            var salesOrderIds = [];
+            
+            if (enableNotes || actionType === 'payment') {
+                for (var i = 0; i < resultsRange.length; i++) {
+                    var tempData = extractRowData(resultsRange[i], actionType);
+                    
+                    // Collect transaction IDs for notes
+                    if (enableNotes) {
+                        var txnId = (actionType === 'deposit') ? tempData.salesOrderId : tempData.invoiceId;
+                        if (txnId) {
+                            transactionIds.push(txnId);
+                        }
+                    }
+                    
+                    // Collect Sales Order IDs for WF auth lookup (payment rows only)
+                    if (actionType === 'payment' && tempData.salesOrderId) {
+                        salesOrderIds.push(tempData.salesOrderId);
+                    }
+                }
+            }
+            
+            // Batch load all notes and WF auths at once
+            var noteMap = enableNotes && transactionIds.length > 0 ? batchLoadMostRecentNotes(transactionIds) : {};
+            var wfAuthMap = salesOrderIds.length > 0 ? batchLoadWellsFargoAuths(salesOrderIds) : {};
+            
+            log.debug('Batch load complete', {
+                actionType: actionType,
+                rowCount: resultsRange.length,
+                notesLoaded: Object.keys(noteMap).length,
+                wfAuthsLoaded: Object.keys(wfAuthMap).length
+            });
+
             var html = '<table class="search-table">';
 
             // Build header row
@@ -1412,7 +1587,18 @@ define(['N/ui/serverWidget', 'N/search', 'N/log', 'N/url', 'N/record', 'N/redire
                     var columnLabel = resultsRange[0].columns[col] ?
                         (resultsRange[0].columns[col].label || 'Column ' + (col + 1)) :
                         'Column ' + (col + 1);
-                    html += '<th>' + escapeHtml(columnLabel) + '</th>';
+                    
+                    // Shorten column names to reduce width
+                    var displayLabel = columnLabel;
+                    if (columnLabel === 'Wells Fargo Authorization Record ID') {
+                        displayLabel = 'WF Record ID';
+                    } else if (columnLabel === 'Wells Fargo Authorization #') {
+                        displayLabel = 'WF Auth #';
+                    } else if (columnLabel === 'Wells Fargo Authorization Amount ($)') {
+                        displayLabel = 'WF Auth Amount ($)';
+                    }
+                    
+                    html += '<th>' + escapeHtml(displayLabel) + '</th>';
                 } catch (e) {
                     html += '<th>Column ' + (col + 1) + '</th>';
                 }
@@ -1433,23 +1619,10 @@ define(['N/ui/serverWidget', 'N/search', 'N/log', 'N/url', 'N/record', 'N/redire
                     var tempData = extractRowData(resultsRange[i], actionType);
                     var transactionId = (actionType === 'deposit') ? tempData.salesOrderId : tempData.invoiceId;
                     
-                    log.debug('Checking for notes', {
-                        rowIndex: i,
-                        actionType: actionType,
-                        transactionId: transactionId,
-                        tempDataKeys: Object.keys(tempData)
-                    });
-                    
-                    if (transactionId) {
-                        recentNote = getMostRecentNote(transactionId);
-                        if (recentNote) {
-                            rowClass = 'has-note';
-                            log.debug('Note found for row', {
-                                rowIndex: i,
-                                transactionId: transactionId,
-                                notePreview: recentNote.note ? recentNote.note.substring(0, 50) : 'empty'
-                            });
-                        }
+                    // Look up pre-loaded note from batch map
+                    if (transactionId && noteMap[transactionId]) {
+                        recentNote = noteMap[transactionId];
+                        rowClass = 'has-note';
                     }
                 }
 
@@ -1492,10 +1665,10 @@ define(['N/ui/serverWidget', 'N/search', 'N/log', 'N/url', 'N/record', 'N/redire
                     var dataId = 'payment_data_' + i;
                     var noteDataId = 'note_data_' + i;
                     
-                    // Get Wells Fargo Authorization records for this invoice's Sales Order
+                    // Get Wells Fargo Authorization records from pre-loaded batch map
                     var wfAuthData = { records: [], total: 0, authNumbers: [] };
-                    if (paymentData.salesOrderId) {
-                        wfAuthData = getWellsFargoAuthsForSalesOrder(paymentData.salesOrderId);
+                    if (paymentData.salesOrderId && wfAuthMap[paymentData.salesOrderId]) {
+                        wfAuthData = wfAuthMap[paymentData.salesOrderId];
                     }
 
                     html += '<td class="action-cell">';
@@ -1649,6 +1822,7 @@ define(['N/ui/serverWidget', 'N/search', 'N/log', 'N/url', 'N/record', 'N/redire
                                     html += '<td style="color: #999; font-style: italic;">No WF records</td>';
                                 }
                             } else if (columnLabel === 'Wells Fargo Authorization Amount ($)' || 
+                                       columnLabel === 'WF Auth Amount ($)' ||
                                        columnLabel === 'WF Authorization Amount' ||
                                        columnLabel === 'Authorization Amount') {
                                 // Display the TOTAL of all WF authorization amounts
@@ -1779,6 +1953,7 @@ define(['N/ui/serverWidget', 'N/search', 'N/log', 'N/url', 'N/record', 'N/redire
                             break;
                         case 'Wells Fargo Authorization #':
                         case 'WF Auth #':
+                        case 'WF Authorization #':
                             data.wfAuthNumber = value;
                             break;
                         case 'Internal ID':
@@ -1920,6 +2095,7 @@ define(['N/ui/serverWidget', 'N/search', 'N/log', 'N/url', 'N/record', 'N/redire
                         mappedData.location = value; // This is the department ID
                         break;
                     case 'Wells Fargo Authorization #':
+                    case 'WF Auth #':
                         mappedData.wfAuthNumber = value;
                         break;
                     default:

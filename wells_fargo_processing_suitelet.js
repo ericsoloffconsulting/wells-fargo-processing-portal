@@ -3,7 +3,7 @@
  * @NScriptType Suitelet
  * @NModuleScope SameAccount
  */
-define(['N/ui/serverWidget', 'N/search', 'N/log', 'N/url', 'N/record', 'N/redirect', 'N/query'], function (serverWidget, search, log, url, record, redirect, query) {
+define(['N/ui/serverWidget', 'N/search', 'N/log', 'N/url', 'N/record', 'N/redirect', 'N/query', 'N/email', 'N/runtime'], function (serverWidget, search, log, url, record, redirect, query, email, runtime) {
 
     /**
   * Handles GET and POST requests to the Suitelet
@@ -579,6 +579,142 @@ define(['N/ui/serverWidget', 'N/search', 'N/log', 'N/url', 'N/record', 'N/redire
                         });
                         throw fieldError;
                     }
+                } else if (action === 'email_sales_rep') {
+                    // Email Sales Rep action
+                    var salesRepId = context.request.parameters.salesrep;
+                    var salesOrderId = context.request.parameters.salesorder;
+                    var salesOrderNumber = context.request.parameters.salesordernumber;
+                    var emailBody = context.request.parameters.emailBody;
+                    var emailSubject = context.request.parameters.emailSubject;
+
+                    log.debug('Emailing Sales Rep', {
+                        salesRepId: salesRepId,
+                        salesOrderId: salesOrderId,
+                        salesOrderNumber: salesOrderNumber,
+                        emailSubject: emailSubject
+                    });
+
+                    // Validate inputs
+                    if (!salesRepId || !salesOrderId || !emailBody || !emailSubject) {
+                        throw new Error('Missing required parameters');
+                    }
+
+                    // Parse and validate sales rep ID
+                    var salesRepIdInt = parseInt(salesRepId, 10);
+                    if (isNaN(salesRepIdInt) || salesRepIdInt <= 0) {
+                        throw new Error('Invalid sales rep ID: ' + salesRepId);
+                    }
+
+                    try {
+                        // Get current user ID as sender
+                        var currentUser = runtime.getCurrentUser();
+                        var authorId = currentUser.id;
+
+                        // Build CC recipients: Employee 185 (manager) and current user
+                        var ccRecipients = [185];
+                        if (authorId !== salesRepIdInt && authorId !== 185) {
+                            ccRecipients.push(authorId);
+                        }
+                        
+                        // Send email to sales rep
+                        email.send({
+                            author: authorId,
+                            recipients: salesRepIdInt,
+                            cc: ccRecipients,
+                            subject: emailSubject,
+                            body: emailBody,
+                            relatedRecords: {
+                                transactionId: parseInt(salesOrderId, 10)
+                            }
+                        });
+
+                        log.audit('Email sent to sales rep', {
+                            salesRepId: salesRepIdInt,
+                            ccRecipients: ccRecipients,
+                            salesOrderId: salesOrderId,
+                            subject: emailSubject
+                        });
+
+                        // Look up sales rep name for the note
+                        var salesRepName = 'Sales Rep';
+                        try {
+                            var empLookup = search.lookupFields({
+                                type: search.Type.EMPLOYEE,
+                                id: salesRepIdInt,
+                                columns: ['firstname', 'lastname']
+                            });
+                            if (empLookup) {
+                                var firstName = empLookup.firstname || '';
+                                var lastName = empLookup.lastname || '';
+                                salesRepName = (firstName + ' ' + lastName).trim();
+                                if (!salesRepName) {
+                                    salesRepName = 'Sales Rep ID ' + salesRepIdInt;
+                                }
+                            }
+                        } catch (lookupError) {
+                            log.error('Error looking up sales rep name', lookupError.message);
+                        }
+
+                        // Create note to log the email
+                        try {
+                            var noteRecord = record.create({
+                                type: 'note',
+                                isDynamic: false
+                            });
+
+                            noteRecord.setValue({
+                                fieldId: 'title',
+                                value: 'Wells Fargo Email Sent'
+                            });
+
+                            var noteText = 'Short authorization email sent to ' + salesRepName + '.\n' +
+                                          'Manager Mohamad Alkayal copied on email.';
+
+                            noteRecord.setValue({
+                                fieldId: 'note',
+                                value: noteText
+                            });
+
+                            noteRecord.setValue({
+                                fieldId: 'transaction',
+                                value: parseInt(salesOrderId, 10)
+                            });
+
+                            var noteId = noteRecord.save();
+
+                            log.audit('Note created after email', {
+                                noteId: noteId,
+                                salesOrderId: salesOrderId,
+                                salesRepName: salesRepName
+                            });
+                        } catch (noteError) {
+                            log.error('Error creating note after email', {
+                                error: noteError.message,
+                                salesOrderId: salesOrderId
+                            });
+                            // Don't fail the whole operation if note creation fails
+                        }
+
+                        // Redirect back with success message
+                        redirect.toSuitelet({
+                            scriptId: context.request.parameters.script,
+                            deploymentId: context.request.parameters.deploy,
+                            parameters: {
+                                success: 'email_sent',
+                                salesOrderNumber: salesOrderNumber
+                            }
+                        });
+
+                    } catch (emailError) {
+                        log.error('Error sending email to sales rep', {
+                            error: emailError.message,
+                            stack: emailError.stack,
+                            salesRepId: salesRepIdInt,
+                            salesOrderId: salesOrderId
+                        });
+                        throw emailError;
+                    }
+
                 } else if (action === 'create_note') {
                     // Log ALL parameters to debug
                     log.debug('Creating Note - All POST Parameters', JSON.stringify(context.request.parameters));
@@ -1124,7 +1260,14 @@ define(['N/ui/serverWidget', 'N/search', 'N/log', 'N/url', 'N/record', 'N/redire
   * @returns {string} HTML content string
   */
     function buildSearchResultsHTML(context) {
-        var html = '<style>' +
+        var html = '<div id="loadingOverlay" class="loading-overlay">' +
+            '<div class="loading-content">' +
+            '<div class="loading-spinner"></div>' +
+            '<div id="loadingText" class="loading-text">Processing...</div>' +
+            '</div>' +
+            '</div>';
+        
+        html += '<style>' +
             // Reset NetSuite default styles and remove borders
             '.uir-page-title-secondline { border: none !important; margin: 0 !important; padding: 0 !important; }' +
             '.uir-record-type { border: none !important; }' +
@@ -1381,15 +1524,131 @@ define(['N/ui/serverWidget', 'N/search', 'N/log', 'N/url', 'N/record', 'N/redire
             '        alert("Error: " + e.message);' +
             '    }' +
             '}' +
-            '</script>';
 
-        // Add loading overlay HTML
-        html += '<div id="loadingOverlay" class="loading-overlay">' +
-            '<div class="loading-content">' +
-            '<div class="loading-spinner"></div>' +
-            '<div id="loadingText" class="loading-text">Processing...</div>' +
-            '</div>' +
-            '</div>';
+            // Email Sales Rep for SHORT authorizations
+            'function emailSalesRep(dataId) {' +
+            '    try {' +
+            '        var container = document.getElementById(dataId);' +
+            '        if (!container) {' +
+            '            alert("Error: Data container not found");' +
+            '            return;' +
+            '        }' +
+            '        ' +
+            '        var salesOrderNumber = container.querySelector("[name=\\"salesordernumber\\"]").value;' +
+            '        var customerName = container.querySelector("[name=\\"customername\\"]").value;' +
+            '        var sellingLocation = container.querySelector("[name=\\"sellinglocation\\"]").value;' +
+            '        var soTotal = container.querySelector("[name=\\"sototal\\"]").value;' +
+            '        var required = container.querySelector("[name=\\"required\\"]").value;' +
+            '        var priorDeposits = container.querySelector("[name=\\"priordeposits\\"]").value;' +
+            '        var wfAmount = container.querySelector("[name=\\"amount\\"]").value;' +
+            '        var afterProcessing = container.querySelector("[name=\\"afterprocessing\\"]").value;' +
+            '        var variance = container.querySelector("[name=\\"variance\\"]").value;' +
+            '        ' +
+            '        var defaultBody = "Wells Fargo Kitchen Works Short Authorization\\n\\n" +' +
+            '                         salesOrderNumber + "\\n" +' +
+            '                         "Customer: " + customerName + "\\n" +' +
+            '                         "Selling Location: " + sellingLocation + "\\n\\n" +' +
+            '                         "DEPOSIT VALIDATION:\\n" +' +
+            '                         "SO Total: " + soTotal + "\\n" +' +
+            '                         "Required (50% CD): " + required + "\\n" +' +
+            '                         "Prior CDs: " + priorDeposits + "\\n" +' +
+            '                         "WF To Be Processed: " + wfAmount + "\\n" +' +
+            '                         "Total CDs After Processing: " + afterProcessing + "\\n\\n" +' +
+            '                         "⚠️ SHORT " + Math.abs(parseFloat(variance)).toFixed(2) + "\\n\\n" +' +
+            '                         "Please review this authorization and follow up on the deposit shortage.\\n\\n" +' +
+            '                         "REMINDER: Authorizations should be for the FULL balance of the Sales Order, allowing us to charge 50% as a Customer Deposit and the remaining balance at the time of invoicing.";' +
+            '        ' +
+            '        var dialog = document.getElementById("emailDialog");' +
+            '        var textarea = document.getElementById("emailTextarea");' +
+            '        var subjectField = document.getElementById("emailSubject");' +
+            '        var currentDataId = document.getElementById("currentEmailDataId");' +
+            '        ' +
+            '        if (dialog && textarea && subjectField && currentDataId) {' +
+            '            currentDataId.value = dataId;' +
+            '            textarea.value = defaultBody;' +
+            '            subjectField.value = "WF Short Auth - Kitchen Works - " + customerName;' +
+            '            dialog.className = "note-dialog-overlay active";' +
+            '            textarea.focus();' +
+            '        }' +
+            '    } catch (e) {' +
+            '        alert("Error: " + e.message);' +
+            '    }' +
+            '}' +
+
+            // Close email dialog
+            'function closeEmailDialog() {' +
+            '    var dialog = document.getElementById("emailDialog");' +
+            '    if (dialog) {' +
+            '        dialog.className = "note-dialog-overlay";' +
+            '    }' +
+            '}' +
+
+            // Submit email
+            'function submitEmail() {' +
+            '    try {' +
+            '        var textarea = document.getElementById("emailTextarea");' +
+            '        var subjectField = document.getElementById("emailSubject");' +
+            '        var dataId = document.getElementById("currentEmailDataId").value;' +
+            '        var emailBody = textarea.value.trim();' +
+            '        var emailSubject = subjectField.value.trim();' +
+            '        ' +
+            '        if (!emailBody) {' +
+            '            alert("Please enter an email body");' +
+            '            return;' +
+            '        }' +
+            '        ' +
+            '        if (!emailSubject) {' +
+            '            alert("Please enter an email subject");' +
+            '            return;' +
+            '        }' +
+            '        ' +
+            '        closeEmailDialog();' +
+            '        showLoading("Sending email...");' +
+            '        ' +
+            '        var dataContainer = document.getElementById(dataId);' +
+            '        if (!dataContainer) {' +
+            '            hideLoading();' +
+            '            alert("Error: Data container not found");' +
+            '            return;' +
+            '        }' +
+            '        ' +
+            '        var form = document.createElement("form");' +
+            '        form.method = "POST";' +
+            '        form.action = window.location.href;' +
+            '        ' +
+            '        var actionInput = document.createElement("input");' +
+            '        actionInput.type = "hidden";' +
+            '        actionInput.name = "action";' +
+            '        actionInput.value = "email_sales_rep";' +
+            '        form.appendChild(actionInput);' +
+            '        ' +
+            '        var inputs = dataContainer.getElementsByTagName("input");' +
+            '        for (var i = 0; i < inputs.length; i++) {' +
+            '            if (inputs[i].name !== "action") {' +
+            '                form.appendChild(inputs[i].cloneNode(true));' +
+            '            }' +
+            '        }' +
+            '        ' +
+            '        var emailBodyInput = document.createElement("input");' +
+            '        emailBodyInput.type = "hidden";' +
+            '        emailBodyInput.name = "emailBody";' +
+            '        emailBodyInput.value = emailBody;' +
+            '        form.appendChild(emailBodyInput);' +
+            '        ' +
+            '        var emailSubjectInput = document.createElement("input");' +
+            '        emailSubjectInput.type = "hidden";' +
+            '        emailSubjectInput.name = "emailSubject";' +
+            '        emailSubjectInput.value = emailSubject;' +
+            '        form.appendChild(emailSubjectInput);' +
+            '        ' +
+            '        document.body.appendChild(form);' +
+            '        form.submit();' +
+            '    } catch (e) {' +
+            '        hideLoading();' +
+            '        alert("Error: " + e.message);' +
+            '    }' +
+            '}' +
+            '</script>';
 
         // Add note dialog HTML
         html += '<div id="noteDialog" class="note-dialog-overlay">' +
@@ -1400,6 +1659,22 @@ define(['N/ui/serverWidget', 'N/search', 'N/log', 'N/url', 'N/record', 'N/redire
             '<div class="note-dialog-buttons">' +
             '<button type="button" class="action-btn" style="background: #666;" onclick="closeNoteDialog()">Cancel</button>' +
             '<button type="button" class="action-btn" onclick="submitNote()">Save Note</button>' +
+            '</div>' +
+            '</div>' +
+            '</div>';
+
+        // Add email dialog HTML
+        html += '<div id="emailDialog" class="note-dialog-overlay">' +
+            '<div class="note-dialog" style="max-width: 600px;">' +
+            '<h3>Send Email to Sales Rep</h3>' +
+            '<label style="display: block; margin-bottom: 5px; font-weight: bold;">Subject:</label>' +
+            '<input type="text" id="emailSubject" style="width: 100%; padding: 8px; margin-bottom: 15px; border: 1px solid #ccc; border-radius: 3px; font-size: 13px;" />' +
+            '<label style="display: block; margin-bottom: 5px; font-weight: bold;">Message:</label>' +
+            '<textarea id="emailTextarea" placeholder="Enter email message..." style="height: 300px;"></textarea>' +
+            '<input type="hidden" id="currentEmailDataId" value="">' +
+            '<div class="note-dialog-buttons">' +
+            '<button type="button" class="action-btn" style="background: #666;" onclick="closeEmailDialog()">Cancel</button>' +
+            '<button type="button" class="action-btn" onclick="submitEmail()">Send Email</button>' +
             '</div>' +
             '</div>' +
             '</div>';
@@ -1425,7 +1700,11 @@ define(['N/ui/serverWidget', 'N/search', 'N/log', 'N/url', 'N/record', 'N/redire
         if (context && context.request.parameters.success) {
             html += '<div class="success-msg">';
 
-            if (context.request.parameters.success === 'note_created') {
+            if (context.request.parameters.success === 'email_sent') {
+                // Email sent success message
+                html += '<strong>Email Sent Successfully</strong><br>';
+                html += 'Sales rep has been notified about the short authorization for ' + escapeHtml(context.request.parameters.salesOrderNumber || 'the sales order') + '.';
+            } else if (context.request.parameters.success === 'note_created') {
                 // Note success message
                 html += '<strong>Note Created Successfully</strong><br>';
                 html += 'A new note has been added to the transaction.';
@@ -1470,6 +1749,18 @@ define(['N/ui/serverWidget', 'N/search', 'N/log', 'N/url', 'N/record', 'N/redire
 
         // Close main container
         html += '</div>';
+
+        // Hide initial loading overlay after page and content are fully loaded
+        html += '<script>' +
+            'document.addEventListener("DOMContentLoaded", function() {' +
+            '    setTimeout(function() {' +
+            '        var overlay = document.getElementById("loadingOverlay");' +
+            '        if (overlay) {' +
+            '            overlay.className = "loading-overlay";' +
+            '        }' +
+            '    }, 100);' +
+            '});' +
+            '</script>';
 
         return html;
     }
@@ -1632,6 +1923,37 @@ define(['N/ui/serverWidget', 'N/search', 'N/log', 'N/url', 'N/record', 'N/redire
                     var mappedData = mapDepositColumns(resultsRange[i]);
                     var dataId = 'deposit_data_' + i;
                     var noteDataId = 'note_data_deposit_' + i;
+                    
+                    // Calculate validation data
+                    var soTotal = parseFloat(mappedData.salesOrderTotal) || 0;
+                    var required = soTotal / 2;
+                    var priorDeposits = parseFloat(mappedData.customerDepositTotal) || 0;
+                    var wfCharge = parseFloat(mappedData.amount) || 0;
+                    var afterProcessing = priorDeposits + wfCharge;
+                    var variance = afterProcessing - required;
+                    var isShort = variance < 0;
+                    
+                    // Get display values for email
+                    var salesOrderNumber = '';
+                    var customerName = '';
+                    var sellingLocation = '';
+                    
+                    for (var col = 0; col < resultsRange[i].columns.length; col++) {
+                        var columnLabel = resultsRange[i].columns[col] ? (resultsRange[i].columns[col].label || '') : '';
+                        var cellValue = resultsRange[i].getValue(resultsRange[i].columns[col]) || '';
+                        var textValue = resultsRange[i].getText(resultsRange[i].columns[col]);
+                        if (textValue && textValue !== 'undefined') {
+                            cellValue = textValue;
+                        }
+                        
+                        if (columnLabel === 'Sales Order #') {
+                            salesOrderNumber = cellValue;
+                        } else if (columnLabel === 'Customer') {
+                            customerName = cellValue;
+                        } else if (columnLabel === 'Selling Location') {
+                            sellingLocation = cellValue;
+                        }
+                    }
 
                     html += '<td class="action-cell">';
 
@@ -1644,10 +1966,24 @@ define(['N/ui/serverWidget', 'N/search', 'N/log', 'N/url', 'N/record', 'N/redire
                     html += '<input type="hidden" name="wfAuthId" value="' + escapeHtml(mappedData.wfAuthId) + '">';
                     html += '<input type="hidden" name="location" value="' + escapeHtml(mappedData.location) + '">';
                     html += '<input type="hidden" name="wfAuthNumber" value="' + escapeHtml(mappedData.wfAuthNumber) + '">';
+                    html += '<input type="hidden" name="salesrep" value="' + escapeHtml(mappedData.salesRep) + '">';
+                    html += '<input type="hidden" name="salesordernumber" value="' + escapeHtml(salesOrderNumber) + '">';
+                    html += '<input type="hidden" name="customername" value="' + escapeHtml(customerName) + '">';
+                    html += '<input type="hidden" name="sellinglocation" value="' + escapeHtml(sellingLocation) + '">';
+                    html += '<input type="hidden" name="sototal" value="' + soTotal.toFixed(2) + '">';
+                    html += '<input type="hidden" name="required" value="' + required.toFixed(2) + '">';
+                    html += '<input type="hidden" name="priordeposits" value="' + priorDeposits.toFixed(2) + '">';
+                    html += '<input type="hidden" name="afterprocessing" value="' + afterProcessing.toFixed(2) + '">';
+                    html += '<input type="hidden" name="variance" value="' + variance.toFixed(2) + '">';
                     html += '</div>';
 
                     // Primary action: Create Deposit button
                     html += '<button type="button" class="action-btn" onclick="promptAndSubmitDeposit(\'' + dataId + '\', \'' + escapeHtml(mappedData.amount) + '\')">Create Deposit</button>';
+
+                    // Email Sales Rep button - only for SHORT rows
+                    if (isShort && mappedData.salesRep) {
+                        html += '<br><button type="button" class="action-btn-secondary" style="margin-top: 4px; background: #e67e22;" onclick="emailSalesRep(\'' + dataId + '\')" title="Email sales rep about short authorization">Email Sales Rep</button>';
+                    }
 
                     // Create Note button for Sales Order - Secondary action (if notes enabled)
                     if (enableNotes && mappedData.salesOrderId) {
@@ -2072,7 +2408,8 @@ define(['N/ui/serverWidget', 'N/search', 'N/log', 'N/url', 'N/record', 'N/redire
             location: '',
             wfAuthNumber: '',
             salesOrderTotal: '',
-            customerDepositTotal: ''
+            customerDepositTotal: '',
+            salesRep: ''
         };
 
         try {
@@ -2097,6 +2434,9 @@ define(['N/ui/serverWidget', 'N/search', 'N/log', 'N/url', 'N/record', 'N/redire
                     case 'Wells Fargo Authorization #':
                     case 'WF Auth #':
                         mappedData.wfAuthNumber = value;
+                        break;
+                    case 'Sales Rep':
+                        mappedData.salesRep = value;
                         break;
                     default:
                         break;

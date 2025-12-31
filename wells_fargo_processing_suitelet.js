@@ -579,19 +579,164 @@ define(['N/ui/serverWidget', 'N/search', 'N/log', 'N/url', 'N/record', 'N/redire
                         });
                         throw fieldError;
                     }
+                } else if (action === 'email_invoice') {
+                    // Email about Invoice/WF Auth
+                    var salesRepId = context.request.parameters.salesrep;
+                    var invoiceId = context.request.parameters.invoiceid;
+                    var invoiceNumber = context.request.parameters.invoicenumber;
+                    var emailBody = context.request.parameters.emailBody;
+                    var emailSubject = context.request.parameters.emailSubject;
+                    var emailReasons = context.request.parameters.emailReasons || '';
+
+                    log.debug('Emailing Sales Rep about Invoice', {
+                        salesRepId: salesRepId,
+                        invoiceId: invoiceId,
+                        invoiceNumber: invoiceNumber,
+                        emailSubject: emailSubject,
+                        emailReasons: emailReasons
+                    });
+
+                    // Validate inputs
+                    if (!salesRepId || !invoiceId || !emailBody || !emailSubject) {
+                        throw new Error('Missing required parameters');
+                    }
+
+                    // Parse and validate sales rep ID
+                    var salesRepIdInt = parseInt(salesRepId, 10);
+                    if (isNaN(salesRepIdInt) || salesRepIdInt <= 0) {
+                        throw new Error('Invalid sales rep ID: ' + salesRepId);
+                    }
+
+                    try {
+                        // Get current user ID as sender
+                        var currentUser = runtime.getCurrentUser();
+                        var authorId = currentUser.id;
+
+                        // Build CC recipients: Just current user (if different from sales rep)
+                        var ccRecipients = [];
+                        if (authorId !== salesRepIdInt) {
+                            ccRecipients.push(authorId);
+                        }
+                        
+                        // Send email
+                        email.send({
+                            author: authorId,
+                            recipients: salesRepIdInt,
+                            cc: ccRecipients.length > 0 ? ccRecipients : undefined,
+                            subject: emailSubject,
+                            body: emailBody,
+                            relatedRecords: {
+                                transactionId: parseInt(invoiceId, 10)
+                            }
+                        });
+
+                        log.audit('Email sent about invoice', {
+                            salesRepId: salesRepIdInt,
+                            ccRecipients: ccRecipients,
+                            actualSalesRepId: salesRepIdInt,
+                            invoiceId: invoiceId,
+                            subject: emailSubject
+                        });
+
+                        // Look up sales rep name for the note
+                        var salesRepName = 'Sales Rep';
+                        try {
+                            var empLookup = search.lookupFields({
+                                type: search.Type.EMPLOYEE,
+                                id: salesRepIdInt,
+                                columns: ['firstname', 'lastname']
+                            });
+                            if (empLookup) {
+                                var firstName = empLookup.firstname || '';
+                                var lastName = empLookup.lastname || '';
+                                salesRepName = (firstName + ' ' + lastName).trim();
+                                if (!salesRepName) {
+                                    salesRepName = 'Sales Rep ID ' + salesRepIdInt;
+                                }
+                            }
+                        } catch (lookupError) {
+                            log.error('Error looking up sales rep name', lookupError.message);
+                        }
+
+                        // Create note to log the email
+                        try {
+                            var noteRecord = record.create({
+                                type: 'note',
+                                isDynamic: false
+                            });
+
+                            noteRecord.setValue({
+                                fieldId: 'title',
+                                value: 'Wells Fargo Email Sent'
+                            });
+
+                            var noteText = 'Sales rep ' + salesRepName + ' was emailed regarding this WF authorization.\n' +
+                                          'Subject: ' + emailSubject + '\n';
+                            
+                            if (emailReasons) {
+                                var reasonsArray = emailReasons.split(',');
+                                noteText += 'Reason(s): ' + reasonsArray.join(', ') + '\n';
+                            }
+                            
+                            noteText += 'See invoice for the email message attached.';
+
+                            noteRecord.setValue({
+                                fieldId: 'note',
+                                value: noteText
+                            });
+
+                            noteRecord.setValue({
+                                fieldId: 'transaction',
+                                value: parseInt(invoiceId, 10)
+                            });
+
+                            var noteId = noteRecord.save();
+
+                            log.audit('Note created after invoice email', {
+                                noteId: noteId,
+                                invoiceId: invoiceId,
+                                salesRepName: salesRepName
+                            });
+                        } catch (noteError) {
+                            log.error('Error creating note after invoice email', {
+                                error: noteError.message,
+                                invoiceId: invoiceId
+                            });
+                            // Don't fail the whole operation if note creation fails
+                        }
+
+                        // Redirect back with success message
+                        redirect.toSuitelet({
+                            scriptId: context.request.parameters.script,
+                            deploymentId: context.request.parameters.deploy,
+                            parameters: {
+                                success: 'email_sent',
+                                salesOrderNumber: invoiceNumber
+                            }
+                        });
+
+                    } catch (emailError) {
+                        log.error('Error sending invoice email', {
+                            error: emailError.message,
+                            invoiceId: invoiceId
+                        });
+                        throw emailError;
+                    }
                 } else if (action === 'email_sales_rep') {
-                    // Email Sales Rep action
+                    // Email Sales Rep action (for deposits)
                     var salesRepId = context.request.parameters.salesrep;
                     var salesOrderId = context.request.parameters.salesorder;
                     var salesOrderNumber = context.request.parameters.salesordernumber;
                     var emailBody = context.request.parameters.emailBody;
                     var emailSubject = context.request.parameters.emailSubject;
+                    var emailReasons = context.request.parameters.emailReasons || '';
 
                     log.debug('Emailing Sales Rep', {
                         salesRepId: salesRepId,
                         salesOrderId: salesOrderId,
                         salesOrderNumber: salesOrderNumber,
-                        emailSubject: emailSubject
+                        emailSubject: emailSubject,
+                        emailReasons: emailReasons
                     });
 
                     // Validate inputs
@@ -669,6 +814,11 @@ define(['N/ui/serverWidget', 'N/search', 'N/log', 'N/url', 'N/record', 'N/redire
 
                             var noteText = 'Short authorization email sent to ' + salesRepName + '.\n' +
                                           'Manager Mohamad Alkayal copied on email.';
+                            
+                            if (emailReasons) {
+                                var reasonsArray = emailReasons.split(',');
+                                noteText += '\nReason(s): ' + reasonsArray.join(', ');
+                            }
 
                             noteRecord.setValue({
                                 fieldId: 'note',
@@ -1525,6 +1675,46 @@ define(['N/ui/serverWidget', 'N/search', 'N/log', 'N/url', 'N/record', 'N/redire
             '    }' +
             '}' +
 
+            // Email about Invoice/WF Auth
+            'function emailInvoice(dataId) {' +
+            '    try {' +
+            '        var container = document.getElementById(dataId);' +
+            '        if (!container) {' +
+            '            alert("Error: Data container not found");' +
+            '            return;' +
+            '        }' +
+            '        ' +
+            '        var invoiceNumber = container.querySelector("[name=\'invoicenumber\']").value;' +
+            '        var customerName = container.querySelector("[name=\'customername\']").value;' +
+            '        var sellingLocation = container.querySelector("[name=\'sellinglocation\']").value;' +
+            '        var salesRepName = container.querySelector("[name=\'salesrepname\']").value || "Sales Rep";' +
+            '        ' +
+            '        var defaultBody = "Wells Fargo Authorization Communication\\n\\n" +' +
+            '                         "Invoice: " + invoiceNumber + "\\n" +' +
+            '                         "Customer: " + customerName + "\\n" +' +
+            '                         "Selling Location: " + sellingLocation;' +
+            '        ' +
+            '        var dialog = document.getElementById("emailDialog");' +
+            '        var textarea = document.getElementById("emailTextarea");' +
+            '        var subjectField = document.getElementById("emailSubject");' +
+            '        var currentDataId = document.getElementById("currentEmailDataId");' +
+            '        var dialogHeader = document.getElementById("emailDialogHeader");' +
+            '        ' +
+            '        if (dialog && textarea && subjectField && currentDataId) {' +
+            '            currentDataId.value = dataId;' +
+            '            textarea.value = defaultBody;' +
+            '            subjectField.value = "WF Auth Communication - " + customerName;' +
+            '            if (dialogHeader) {' +
+            '                dialogHeader.textContent = "Send Email to " + salesRepName;' +
+            '            }' +
+            '            dialog.className = "note-dialog-overlay active";' +
+            '            textarea.focus();' +
+            '        }' +
+            '    } catch (e) {' +
+            '        alert("Error: " + e.message);' +
+            '    }' +
+            '}' +
+
             // Email Sales Rep for SHORT authorizations
             'function emailSalesRep(dataId) {' +
             '    try {' +
@@ -1543,6 +1733,7 @@ define(['N/ui/serverWidget', 'N/search', 'N/log', 'N/url', 'N/record', 'N/redire
             '        var wfAmount = container.querySelector("[name=\\"amount\\"]").value;' +
             '        var afterProcessing = container.querySelector("[name=\\"afterprocessing\\"]").value;' +
             '        var variance = container.querySelector("[name=\\"variance\\"]").value;' +
+            '        var salesRepName = container.querySelector("[name=\\"salesrepname\\"]").value || "Sales Rep";' +
             '        ' +
             '        var defaultBody = "Wells Fargo Kitchen Works Short Authorization\\n\\n" +' +
             '                         salesOrderNumber + "\\n" +' +
@@ -1562,11 +1753,15 @@ define(['N/ui/serverWidget', 'N/search', 'N/log', 'N/url', 'N/record', 'N/redire
             '        var textarea = document.getElementById("emailTextarea");' +
             '        var subjectField = document.getElementById("emailSubject");' +
             '        var currentDataId = document.getElementById("currentEmailDataId");' +
+            '        var dialogHeader = document.getElementById("emailDialogHeader");' +
             '        ' +
             '        if (dialog && textarea && subjectField && currentDataId) {' +
             '            currentDataId.value = dataId;' +
             '            textarea.value = defaultBody;' +
             '            subjectField.value = "WF Short Auth - Kitchen Works - " + customerName;' +
+            '            if (dialogHeader) {' +
+            '                dialogHeader.textContent = "Send Email to " + salesRepName + " + Mohamad";' +
+            '            }' +
             '            dialog.className = "note-dialog-overlay active";' +
             '            textarea.focus();' +
             '        }' +
@@ -1588,6 +1783,7 @@ define(['N/ui/serverWidget', 'N/search', 'N/log', 'N/url', 'N/record', 'N/redire
             '    try {' +
             '        var textarea = document.getElementById("emailTextarea");' +
             '        var subjectField = document.getElementById("emailSubject");' +
+            '        var reasonsSelect = document.getElementById("emailReasons");' +
             '        var dataId = document.getElementById("currentEmailDataId").value;' +
             '        var emailBody = textarea.value.trim();' +
             '        var emailSubject = subjectField.value.trim();' +
@@ -1600,6 +1796,16 @@ define(['N/ui/serverWidget', 'N/search', 'N/log', 'N/url', 'N/record', 'N/redire
             '        if (!emailSubject) {' +
             '            alert("Please enter an email subject");' +
             '            return;' +
+            '        }' +
+            '        ' +
+            '        var selectedReasons = [];' +
+            '        if (reasonsSelect) {' +
+            '            var options = reasonsSelect.options;' +
+            '            for (var i = 0; i < options.length; i++) {' +
+            '                if (options[i].selected) {' +
+            '                    selectedReasons.push(options[i].value);' +
+            '                }' +
+            '            }' +
             '        }' +
             '        ' +
             '        closeEmailDialog();' +
@@ -1616,17 +1822,9 @@ define(['N/ui/serverWidget', 'N/search', 'N/log', 'N/url', 'N/record', 'N/redire
             '        form.method = "POST";' +
             '        form.action = window.location.href;' +
             '        ' +
-            '        var actionInput = document.createElement("input");' +
-            '        actionInput.type = "hidden";' +
-            '        actionInput.name = "action";' +
-            '        actionInput.value = "email_sales_rep";' +
-            '        form.appendChild(actionInput);' +
-            '        ' +
             '        var inputs = dataContainer.getElementsByTagName("input");' +
             '        for (var i = 0; i < inputs.length; i++) {' +
-            '            if (inputs[i].name !== "action") {' +
-            '                form.appendChild(inputs[i].cloneNode(true));' +
-            '            }' +
+            '            form.appendChild(inputs[i].cloneNode(true));' +
             '        }' +
             '        ' +
             '        var emailBodyInput = document.createElement("input");' +
@@ -1640,6 +1838,14 @@ define(['N/ui/serverWidget', 'N/search', 'N/log', 'N/url', 'N/record', 'N/redire
             '        emailSubjectInput.name = "emailSubject";' +
             '        emailSubjectInput.value = emailSubject;' +
             '        form.appendChild(emailSubjectInput);' +
+            '        ' +
+            '        if (selectedReasons.length > 0) {' +
+            '            var reasonsInput = document.createElement("input");' +
+            '            reasonsInput.type = "hidden";' +
+            '            reasonsInput.name = "emailReasons";' +
+            '            reasonsInput.value = selectedReasons.join(",");' +
+            '            form.appendChild(reasonsInput);' +
+            '        }' +
             '        ' +
             '        document.body.appendChild(form);' +
             '        form.submit();' +
@@ -1666,11 +1872,19 @@ define(['N/ui/serverWidget', 'N/search', 'N/log', 'N/url', 'N/record', 'N/redire
         // Add email dialog HTML
         html += '<div id="emailDialog" class="note-dialog-overlay">' +
             '<div class="note-dialog" style="max-width: 600px;">' +
-            '<h3>Send Email to Sales Rep</h3>' +
+            '<h3 id="emailDialogHeader">Send Email to Sales Rep</h3>' +
             '<label style="display: block; margin-bottom: 5px; font-weight: bold;">Subject:</label>' +
             '<input type="text" id="emailSubject" style="width: 100%; padding: 8px; margin-bottom: 15px; border: 1px solid #ccc; border-radius: 3px; font-size: 13px;" />' +
             '<label style="display: block; margin-bottom: 5px; font-weight: bold;">Message:</label>' +
             '<textarea id="emailTextarea" placeholder="Enter email message..." style="height: 300px;"></textarea>' +
+            '<label style="display: block; margin-top: 15px; margin-bottom: 5px; font-weight: bold;">Reason for Email (select all that apply):</label>' +
+            '<select id="emailReasons" multiple size="4" style="width: 100%; padding: 8px; border: 1px solid #ccc; border-radius: 3px; font-size: 13px;">' +
+            '<option value="Additional Authorization Needed">Additional Authorization Needed</option>' +
+            '<option value="Signature Needed">Signature Needed</option>' +
+            '<option value="Financing Code Error">Financing Code Error</option>' +
+            '<option value="Other Reason">Other Reason</option>' +
+            '</select>' +
+            '<div style="font-size: 11px; color: #666; margin-top: 5px; font-style: italic;">Hold Ctrl (Windows) or Cmd (Mac) to select multiple options</div>' +
             '<input type="hidden" id="currentEmailDataId" value="">' +
             '<div class="note-dialog-buttons">' +
             '<button type="button" class="action-btn" style="background: #666;" onclick="closeEmailDialog()">Cancel</button>' +
@@ -1967,6 +2181,7 @@ define(['N/ui/serverWidget', 'N/search', 'N/log', 'N/url', 'N/record', 'N/redire
                     html += '<input type="hidden" name="location" value="' + escapeHtml(mappedData.location) + '">';
                     html += '<input type="hidden" name="wfAuthNumber" value="' + escapeHtml(mappedData.wfAuthNumber) + '">';
                     html += '<input type="hidden" name="salesrep" value="' + escapeHtml(mappedData.salesRep) + '">';
+                    html += '<input type="hidden" name="salesrepname" value="' + escapeHtml(mappedData.salesRepName) + '">';
                     html += '<input type="hidden" name="salesordernumber" value="' + escapeHtml(salesOrderNumber) + '">';
                     html += '<input type="hidden" name="customername" value="' + escapeHtml(customerName) + '">';
                     html += '<input type="hidden" name="sellinglocation" value="' + escapeHtml(sellingLocation) + '">';
@@ -1980,9 +2195,9 @@ define(['N/ui/serverWidget', 'N/search', 'N/log', 'N/url', 'N/record', 'N/redire
                     // Primary action: Create Deposit button
                     html += '<button type="button" class="action-btn" onclick="promptAndSubmitDeposit(\'' + dataId + '\', \'' + escapeHtml(mappedData.amount) + '\')">Create Deposit</button>';
 
-                    // Email Sales Rep button - only for SHORT rows
+                    // Email Sales Rep button - only for SHORT rows (red to match SHORT label)
                     if (isShort && mappedData.salesRep) {
-                        html += '<br><button type="button" class="action-btn-secondary" style="margin-top: 4px; background: #e67e22;" onclick="emailSalesRep(\'' + dataId + '\')" title="Email sales rep about short authorization">Email Sales Rep</button>';
+                        html += '<br><button type="button" class="action-btn-secondary" style="margin-top: 4px; background: #c0392b;" onclick="emailSalesRep(\'' + dataId + '\')" title="Email sales rep about short authorization">Email Sales Rep</button>';
                     }
 
                     // Create Note button for Sales Order - Secondary action (if notes enabled)
@@ -2009,6 +2224,19 @@ define(['N/ui/serverWidget', 'N/search', 'N/log', 'N/url', 'N/record', 'N/redire
 
                     html += '<td class="action-cell">';
 
+                    // Hidden data container for ALL payment rows (invoices and credit memos)
+                    var emailDataId = 'email_data_' + i;
+                    html += '<div id="' + emailDataId + '" class="hidden-data">';
+                    html += '<input type="hidden" name="action" value="email_invoice">';
+                    html += '<input type="hidden" name="invoiceid" value="' + escapeHtml(paymentData.invoiceId) + '">';
+                    html += '<input type="hidden" name="invoicenumber" value="' + escapeHtml(paymentData.invoiceNumber) + '">';
+                    html += '<input type="hidden" name="customername" value="' + escapeHtml(paymentData.customerName) + '">';
+                    html += '<input type="hidden" name="salesordernumber" value="' + escapeHtml(paymentData.salesOrderNumber) + '">';
+                    html += '<input type="hidden" name="sellinglocation" value="' + escapeHtml(paymentData.sellingLocation) + '">';
+                    html += '<input type="hidden" name="salesrep" value="' + escapeHtml(paymentData.salesRep) + '">';
+                    html += '<input type="hidden" name="salesrepname" value="' + escapeHtml(paymentData.salesRepName) + '">';
+                    html += '</div>';
+
                     // Check if this is a Credit Memo
                     if (paymentData.transactionType === 'Credit Memo') {
                         html += '<span style="color: #666; font-style: italic; font-size: 11px;">Refund Manually</span>';
@@ -2024,6 +2252,11 @@ define(['N/ui/serverWidget', 'N/search', 'N/log', 'N/url', 'N/record', 'N/redire
 
                         // Primary action: Create Payment button
                         html += '<button type="button" class="action-btn" onclick="promptAndSubmitPayment(\'' + dataId + '\', \'' + escapeHtml(paymentData.amount) + '\')">Create Payment</button>';
+
+                        // Email Sales Rep button for invoices (orange)
+                        if (paymentData.salesRep) {
+                            html += '<br><button type="button" class="action-btn-secondary" style="margin-top: 4px; background: #e67e22;" onclick="emailInvoice(\'' + emailDataId + '\')" title="Email sales rep about this WF authorization">Email Sales Rep</button>';
+                        }
                     }
 
                     // Create Note button for ALL rows (invoices and credit memos) - Secondary action
@@ -2267,6 +2500,7 @@ define(['N/ui/serverWidget', 'N/search', 'N/log', 'N/url', 'N/record', 'N/redire
                     var column = result.columns[i];
                     var label = column.label || '';
                     var value = result.getValue(column) || '';
+                    var textValue = result.getText(column) || '';
 
                     switch (label) {
                         case 'Document #':
@@ -2276,10 +2510,12 @@ define(['N/ui/serverWidget', 'N/search', 'N/log', 'N/url', 'N/record', 'N/redire
                             data.invoiceNumber = value;
                             break;
                         case 'Type':
-                            transactionType = result.getText(column) || value;
+                            transactionType = textValue || value;
                             data.transactionType = transactionType;
                             break;
                         case 'Customer':
+                            data.customerName = textValue || value;
+                            break;
                         case 'Customer Internal ID':
                             data.customerId = value;
                             break;
@@ -2299,6 +2535,18 @@ define(['N/ui/serverWidget', 'N/search', 'N/log', 'N/url', 'N/record', 'N/redire
                             break;
                         case 'Sales Order Internal ID':
                             data.salesOrderId = value;
+                            break;
+                        case 'Sales Order #':
+                        case 'Sales Order Number':
+                            data.salesOrderNumber = value;
+                            break;
+                        case 'Selling Location':
+                        case 'Selling Location (Store)':
+                            data.sellingLocation = textValue || value;
+                            break;
+                        case 'Sales Rep':
+                            data.salesRep = value;
+                            data.salesRepName = textValue || value;
                             break;
                         default:
                             break;
@@ -2409,7 +2657,8 @@ define(['N/ui/serverWidget', 'N/search', 'N/log', 'N/url', 'N/record', 'N/redire
             wfAuthNumber: '',
             salesOrderTotal: '',
             customerDepositTotal: '',
-            salesRep: ''
+            salesRep: '',
+            salesRepName: ''
         };
 
         try {
@@ -2417,6 +2666,7 @@ define(['N/ui/serverWidget', 'N/search', 'N/log', 'N/url', 'N/record', 'N/redire
                 var column = result.columns[i];
                 var label = column.label || '';
                 var value = result.getValue(column) || '';
+                var textValue = result.getText(column) || '';
 
                 switch (label) {
                     case 'Customer Internal ID':
@@ -2437,6 +2687,7 @@ define(['N/ui/serverWidget', 'N/search', 'N/log', 'N/url', 'N/record', 'N/redire
                         break;
                     case 'Sales Rep':
                         mappedData.salesRep = value;
+                        mappedData.salesRepName = textValue || value;
                         break;
                     default:
                         break;

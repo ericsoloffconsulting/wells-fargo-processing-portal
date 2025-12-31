@@ -311,6 +311,34 @@ define(['N/ui/serverWidget', 'N/search', 'N/log', 'N/url', 'N/record', 'N/redire
                         invoiceNumber: invoiceNumber
                     });
 
+                    // Fallback: If customer ID is missing, try to find invoice and get customer from it
+                    if (!customerId && invoiceNumber) {
+                        try {
+                            var tempInvoiceSearch = search.create({
+                                type: search.Type.INVOICE,
+                                filters: [
+                                    ['tranid', 'is', invoiceNumber],
+                                    'AND',
+                                    ['mainline', 'is', 'T']
+                                ],
+                                columns: ['entity', 'internalid']
+                            });
+                            var tempResults = tempInvoiceSearch.run().getRange({ start: 0, end: 1 });
+                            if (tempResults.length > 0) {
+                                customerId = tempResults[0].getValue('entity');
+                                log.debug('Customer ID retrieved via invoice search', {
+                                    invoiceNumber: invoiceNumber,
+                                    customerId: customerId
+                                });
+                            }
+                        } catch (lookupError) {
+                            log.error('Error looking up customer from invoice', {
+                                error: lookupError.message,
+                                invoiceNumber: invoiceNumber
+                            });
+                        }
+                    }
+
                     // Validate inputs
                     if (!customerId || !amount) {
                         throw new Error('Missing required parameters: customer=' + customerId + ', amount=' + amount);
@@ -2500,7 +2528,6 @@ define(['N/ui/serverWidget', 'N/search', 'N/log', 'N/url', 'N/record', 'N/redire
                     var column = result.columns[i];
                     var label = column.label || '';
                     var value = result.getValue(column) || '';
-                    var textValue = result.getText(column) || '';
 
                     switch (label) {
                         case 'Document #':
@@ -2510,11 +2537,21 @@ define(['N/ui/serverWidget', 'N/search', 'N/log', 'N/url', 'N/record', 'N/redire
                             data.invoiceNumber = value;
                             break;
                         case 'Type':
-                            transactionType = textValue || value;
+                            try {
+                                var typeText = result.getText(column) || '';
+                                transactionType = typeText || value;
+                            } catch (e) {
+                                transactionType = value;
+                            }
                             data.transactionType = transactionType;
                             break;
                         case 'Customer':
-                            data.customerName = textValue || value;
+                            data.customerId = value;  // Get the customer ID
+                            try {
+                                data.customerName = result.getText(column) || value;
+                            } catch (e) {
+                                data.customerName = value;
+                            }
                             break;
                         case 'Customer Internal ID':
                             data.customerId = value;
@@ -2542,11 +2579,19 @@ define(['N/ui/serverWidget', 'N/search', 'N/log', 'N/url', 'N/record', 'N/redire
                             break;
                         case 'Selling Location':
                         case 'Selling Location (Store)':
-                            data.sellingLocation = textValue || value;
+                            try {
+                                data.sellingLocation = result.getText(column) || value;
+                            } catch (e) {
+                                data.sellingLocation = value;
+                            }
                             break;
                         case 'Sales Rep':
                             data.salesRep = value;
-                            data.salesRepName = textValue || value;
+                            try {
+                                data.salesRepName = result.getText(column) || value;
+                            } catch (e) {
+                                data.salesRepName = value;
+                            }
                             break;
                         default:
                             break;

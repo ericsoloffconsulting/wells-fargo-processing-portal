@@ -1481,6 +1481,10 @@ define(['N/ui/serverWidget', 'N/search', 'N/log', 'N/url', 'N/record', 'N/redire
             '.action-btn:disabled { background-color: #cccccc; cursor: not-allowed; }' +
             '.action-btn-secondary { background-color: #5b9bd5; color: white; padding: 5px 10px; border: none; cursor: pointer; border-radius: 3px; font-size: 10px; text-decoration: none; display: inline-block; transition: background-color 0.3s; }' +
             '.action-btn-secondary:hover { background-color: #4a8bc2; text-decoration: none; }' +
+            '.action-btn-email-red { background-color: #c0392b !important; }' +
+            '.action-btn-email-red:hover { background-color: #a93226 !important; }' +
+            '.action-btn-email-orange { background-color: #e67e22 !important; }' +
+            '.action-btn-email-orange:hover { background-color: #d35400 !important; }' +
             '.action-cell { text-align: center; white-space: nowrap; padding: 4px; }' +
 
             // Note-related styling
@@ -2244,7 +2248,7 @@ define(['N/ui/serverWidget', 'N/search', 'N/log', 'N/url', 'N/record', 'N/redire
 
                     // Email Sales Rep button - only for SHORT rows (red to match SHORT label)
                     if (isShort && mappedData.salesRep) {
-                        html += '<br><button type="button" class="action-btn-secondary" style="margin-top: 4px; background: #c0392b;" onclick="emailSalesRep(\'' + dataId + '\')" title="Email sales rep about short authorization">Email Sales Rep</button>';
+                        html += '<br><button type="button" class="action-btn-secondary action-btn-email-red" style="margin-top: 4px;" onclick="emailSalesRep(\'' + dataId + '\')" title="Email sales rep about short authorization">Email Sales Rep</button>';
                     }
 
                     // Create Note button for Sales Order - Secondary action (if notes enabled)
@@ -2302,7 +2306,7 @@ define(['N/ui/serverWidget', 'N/search', 'N/log', 'N/url', 'N/record', 'N/redire
 
                         // Email Sales Rep button for invoices (orange)
                         if (paymentData.salesRep) {
-                            html += '<br><button type="button" class="action-btn-secondary" style="margin-top: 4px; background: #e67e22;" onclick="emailInvoice(\'' + emailDataId + '\')" title="Email sales rep about this WF authorization">Email Sales Rep</button>';
+                            html += '<br><button type="button" class="action-btn-secondary action-btn-email-orange" style="margin-top: 4px;" onclick="emailInvoice(\'' + emailDataId + '\')" title="Email sales rep about this WF authorization">Email Sales Rep</button>';
                         }
                     }
 

@@ -783,7 +783,7 @@ define(['N/ui/serverWidget', 'N/search', 'N/log', 'N/url', 'N/record', 'N/redire
                         var currentUser = runtime.getCurrentUser();
                         var authorId = currentUser.id;
 
-                        // Build CC recipients: Employee 185 (manager) and current user
+                        // Build CC recipients: Employee 185 (Mohamad) and current user
                         var ccRecipients = [185];
                         if (authorId !== salesRepIdInt && authorId !== 185) {
                             ccRecipients.push(authorId);
@@ -1851,9 +1851,27 @@ define(['N/ui/serverWidget', 'N/search', 'N/log', 'N/url', 'N/record', 'N/redire
             '        form.action = window.location.href;' +
             '        ' +
             '        var inputs = dataContainer.getElementsByTagName("input");' +
+            '        var originalAction = "";' +
             '        for (var i = 0; i < inputs.length; i++) {' +
-            '            form.appendChild(inputs[i].cloneNode(true));' +
+            '            if (inputs[i].name === "action") {' +
+            '                originalAction = inputs[i].value;' +
+            '            } else {' +
+            '                form.appendChild(inputs[i].cloneNode(true));' +
+            '            }' +
             '        }' +
+            '        ' +
+            '        var emailAction = "email_sales_rep";' +
+            '        if (originalAction === "email_invoice") {' +
+            '            emailAction = "email_invoice";' +
+            '        } else if (originalAction === "create_payment") {' +
+            '            emailAction = "email_invoice";' +
+            '        }' +
+            '        ' +
+            '        var actionInput = document.createElement("input");' +
+            '        actionInput.type = "hidden";' +
+            '        actionInput.name = "action";' +
+            '        actionInput.value = emailAction;' +
+            '        form.appendChild(actionInput);' +
             '        ' +
             '        var emailBodyInput = document.createElement("input");' +
             '        emailBodyInput.type = "hidden";' +
@@ -1945,7 +1963,8 @@ define(['N/ui/serverWidget', 'N/search', 'N/log', 'N/url', 'N/record', 'N/redire
             if (context.request.parameters.success === 'email_sent') {
                 // Email sent success message
                 html += '<strong>Email Sent Successfully</strong><br>';
-                html += 'Sales rep has been notified about the short authorization for ' + escapeHtml(context.request.parameters.salesOrderNumber || 'the sales order') + '.';
+                var transactionRef = context.request.parameters.salesOrderNumber || context.request.parameters.invoiceNumber || 'the transaction';
+                html += 'Sales rep has been notified regarding ' + escapeHtml(transactionRef) + '.';
             } else if (context.request.parameters.success === 'note_created') {
                 // Note success message
                 html += '<strong>Note Created Successfully</strong><br>';
